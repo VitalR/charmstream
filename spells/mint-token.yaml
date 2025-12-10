@@ -1,0 +1,22 @@
+version: 8
+
+apps:
+  $00: n/${app_id}/${app_vk}
+  $01: t/${app_id}/${app_vk}
+
+ins:
+  - utxo_id: ${in_utxo_1}
+    charms:
+      $00:
+        ticker: CHARMSTREAM
+        remaining: 100000
+
+outs:
+  - address: ${addr_1}
+    charms:
+      $01: 69420
+  - address: ${addr_2}
+    charms:
+      $00:
+        ticker: CHARMSTREAM
+        remaining: 30580
