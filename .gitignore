@@ -1,4 +1,34 @@
+# Build
 /target
 /elf
 
+# Docs
 /docs/TODO.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# Dependencies
+node_modules/
+.next/
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+*.temp
+
+# Environment
+.env
+.env.testnet
+
+# Custom files
+draft
+notes.txt
