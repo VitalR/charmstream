@@ -1,0 +1,25 @@
+version: 8
+
+apps:
+  # Single app handle $00, pointing to charmstream contract
+  $00: n/${app_id}/${app_vk}
+
+# ---- Private input (witness) for this app ----
+private_inputs:
+  $00: ${now}
+
+# ---- Transaction inputs ----
+ins:
+  # Funding UTXO – no stream charm yet
+  - utxo_id: ${in_utxo_0}
+
+# ---- Transaction outputs ----
+outs:
+  # Stream UTXO: carries the StreamState charm for our app
+  - address: ${addr_0}
+    charms:
+      $00:
+        total_amount: ${total_amount}
+        claimed_amount: 0
+        start_time: ${start_time}
+        end_time: ${end_time}
