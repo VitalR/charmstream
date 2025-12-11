@@ -1,131 +1,242 @@
-use charms_sdk::data::{
-    charm_values, check, sum_token_amount, App, Data, Transaction, UtxoId, B32, NFT, TOKEN,
-};
+use charms_sdk::data::{charm_values, check, App, Data, Transaction};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NftContent {
-    pub ticker: String,
-    pub remaining: u64,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamState {
+    pub total_amount: u64,   // Total stream amount (in token units)
+    pub claimed_amount: u64, // Already claimed
+    pub start_time: u64,     // Unix ts (seconds)
+    pub end_time: u64,       // Must be > start_time
+}
+
+impl StreamState {
+    pub fn vested_at(&self, now: u64) -> u64 {
+        if now <= self.start_time {
+            0
+        } else if now >= self.end_time {
+            self.total_amount
+        } else {
+            let elapsed = now - self.start_time;
+            let duration = self.end_time - self.start_time;
+            self.total_amount.saturating_mul(elapsed) / duration
+        }
+    }
 }
 
 pub fn app_contract(app: &App, tx: &Transaction, x: &Data, w: &Data) -> bool {
+    // For now we don't use public input x; require it to be empty.
     let empty = Data::empty();
-    assert_eq!(x, &empty);
-    match app.tag {
-        NFT => {
-            check!(nft_contract_satisfied(app, tx, w))
+    check!(x == &empty);
+
+    check!(stream_contract_satisfied(app, tx, w));
+
+    true
+}
+
+fn stream_contract_satisfied(app: &App, tx: &Transaction, w: &Data) -> bool {
+    // Decode "now" as u64 from witness `w`
+    let now: u64 = match w.value() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("witness must contain a u64 `now` timestamp");
+            return false;
         }
-        TOKEN => {
-            check!(token_contract_satisfied(app, tx))
+    };
+
+    let ins = stream_states_in(app, tx);
+    let outs = stream_states_out(app, tx);
+
+    match (ins.len(), outs.len()) {
+        // CREATE: 0 input streams, 1 output stream
+        (0, 1) => {
+            check!(validate_create(&outs[0]));
+            true
         }
-        _ => unreachable!(),
+
+        // CLAIM: 1 input stream, 1 output stream
+        (1, 1) => {
+            check!(validate_claim(&ins[0], &outs[0], now));
+            true
+        }
+
+        // For now: disallow anything else
+        _ => {
+            eprintln!(
+                "unexpected number of stream states: in={}, out={}",
+                ins.len(),
+                outs.len()
+            );
+            false
+        }
+    }
+}
+
+fn validate_create(out: &StreamState) -> bool {
+    if out.total_amount == 0 {
+        eprintln!("total_amount must be > 0");
+        return false;
+    }
+    if out.start_time >= out.end_time {
+        eprintln!("start_time must be < end_time");
+        return false;
+    }
+    if out.claimed_amount != 0 {
+        eprintln!("claimed_amount must be 0 at create");
+        return false;
     }
     true
 }
 
-// TODO replace with your own logic
-fn nft_contract_satisfied(app: &App, tx: &Transaction, w: &Data) -> bool {
-    let token_app = &App {
-        tag: TOKEN,
-        identity: app.identity.clone(),
-        vk: app.vk.clone(),
-    };
-    check!(can_mint_nft(app, tx, w) || can_mint_token(&token_app, tx));
-    true
-}
-
-fn can_mint_nft(nft_app: &App, tx: &Transaction, w: &Data) -> bool {
-    let w_str: Option<String> = w.value().ok();
-
-    check!(w_str.is_some());
-    let w_str = w_str.unwrap();
-
-    // can only mint an NFT with this contract if the hash of `w` is the identity of the NFT.
-    check!(hash(&w_str) == nft_app.identity);
-
-    // can only mint an NFT with this contract if spending a UTXO with the same ID as passed in `w`.
-    let w_utxo_id = UtxoId::from_str(&w_str).unwrap();
-    check!(tx.ins.iter().any(|(utxo_id, _)| utxo_id == &w_utxo_id));
-
-    let nft_charms = charm_values(nft_app, tx.outs.iter()).collect::<Vec<_>>();
-
-    // can mint exactly one NFT.
-    check!(nft_charms.len() == 1);
-    // the NFT has the correct structure.
-    check!(nft_charms[0].value::<NftContent>().is_ok());
-    true
-}
-
-pub(crate) fn hash(data: &str) -> B32 {
-    let hash = Sha256::digest(data);
-    B32(hash.into())
-}
-
-// TODO replace with your own logic
-fn token_contract_satisfied(token_app: &App, tx: &Transaction) -> bool {
-    check!(can_mint_token(token_app, tx));
-    true
-}
-
-fn can_mint_token(token_app: &App, tx: &Transaction) -> bool {
-    let nft_app = App {
-        tag: NFT,
-        identity: token_app.identity.clone(),
-        vk: token_app.vk.clone(),
-    };
-
-    let Some(nft_content): Option<NftContent> =
-        charm_values(&nft_app, tx.ins.iter().map(|(_, v)| v)).find_map(|data| data.value().ok())
-    else {
-        eprintln!("could not determine incoming remaining supply");
-        return false;
-    };
-    let incoming_supply = nft_content.remaining;
-
-    let Some(nft_content): Option<NftContent> =
-        charm_values(&nft_app, tx.outs.iter()).find_map(|data| data.value().ok())
-    else {
-        eprintln!("could not determine outgoing remaining supply");
-        return false;
-    };
-    let outgoing_supply = nft_content.remaining;
-
-    if !(incoming_supply >= outgoing_supply) {
-        eprintln!("incoming remaining supply must be >= outgoing remaining supply");
+fn validate_claim(prev: &StreamState, next: &StreamState, now: u64) -> bool {
+    if now < prev.start_time {
+        eprintln!("cannot claim before stream start_time");
         return false;
     }
 
-    let Some(input_token_amount) = sum_token_amount(&token_app, tx.ins.iter().map(|(_, v)| v)).ok()
-    else {
-        eprintln!("could not determine input total token amount");
+    // same schedule
+    if next.total_amount != prev.total_amount {
+        eprintln!("total_amount cannot change");
         return false;
-    };
-    let Some(output_token_amount) = sum_token_amount(&token_app, tx.outs.iter()).ok() else {
-        eprintln!("could not determine output total token amount");
+    }
+    if next.start_time != prev.start_time || next.end_time != prev.end_time {
+        eprintln!("stream schedule cannot change");
         return false;
-    };
+    }
 
-    // can mint no more than what's allowed by the managing NFT state change.
-    output_token_amount - input_token_amount == incoming_supply - outgoing_supply
+    // claimed only moves forward
+    if next.claimed_amount < prev.claimed_amount {
+        eprintln!("claimed_amount cannot decrease");
+        return false;
+    }
+
+    // hard upper bound
+    if next.claimed_amount > next.total_amount {
+        eprintln!("claimed_amount cannot exceed total_amount");
+        return false;
+    }
+
+    // no more than vested
+    let vested = prev.vested_at(now);
+    if next.claimed_amount > vested {
+        eprintln!(
+            "claimed_amount {} exceeds vested {} at now={}",
+            next.claimed_amount, vested, now
+        );
+        return false;
+    }
+
+    true
+}
+
+fn stream_states_in(app: &App, tx: &Transaction) -> Vec<StreamState> {
+    // Inputs: tx.ins is Vec<(UtxoId, Data)>
+    charm_values(app, tx.ins.iter().map(|(_, v)| v))
+        .filter_map(|data| data.value::<StreamState>().ok())
+        .collect()
+}
+
+fn stream_states_out(app: &App, tx: &Transaction) -> Vec<StreamState> {
+    // Outputs: tx.outs is Vec<Data>
+    charm_values(app, tx.outs.iter())
+        .filter_map(|data| data.value::<StreamState>().ok())
+        .collect()
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
-    use charms_sdk::data::UtxoId;
 
     #[test]
-    fn dummy() {}
+    fn test_vested_at_linear() {
+        let s = StreamState {
+            total_amount: 100,
+            claimed_amount: 0,
+            start_time: 1000,
+            end_time: 2000,
+        };
 
-    #[test]
-    fn test_hash() {
-        let utxo_id =
-            UtxoId::from_str("dc78b09d767c8565c4a58a95e7ad5ee22b28fc1685535056a395dc94929cdd5f:1")
-                .unwrap();
-        let data = dbg!(utxo_id.to_string());
-        let expected = "f54f6d40bd4ba808b188963ae5d72769ad5212dd1d29517ecc4063dd9f033faa";
-        assert_eq!(&hash(&data).to_string(), expected);
+        assert_eq!(s.vested_at(900), 0);
+        assert_eq!(s.vested_at(1000), 0);
+        assert_eq!(s.vested_at(1500), 50);
+        assert_eq!(s.vested_at(2000), 100);
+        assert_eq!(s.vested_at(2100), 100);
     }
+}
+
+#[test]
+fn validate_create_rejects_zero_total() {
+    let s = StreamState {
+        total_amount: 0,
+        claimed_amount: 0,
+        start_time: 1000,
+        end_time: 2000,
+    };
+    assert!(!validate_create(&s));
+}
+
+#[test]
+fn validate_create_rejects_claimed_nonzero() {
+    let s = StreamState {
+        total_amount: 100,
+        claimed_amount: 1,
+        start_time: 1000,
+        end_time: 2000,
+    };
+    assert!(!validate_create(&s));
+}
+
+#[test]
+fn validate_claim_happy_path() {
+    let prev = StreamState {
+        total_amount: 100,
+        claimed_amount: 0,
+        start_time: 1000,
+        end_time: 2000,
+    };
+    // at now=1500, vested=50
+    let next = StreamState {
+        total_amount: 100,
+        claimed_amount: 50,
+        start_time: 1000,
+        end_time: 2000,
+    };
+
+    assert!(validate_claim(&prev, &next, 1500));
+}
+
+#[test]
+fn validate_claim_rejects_over_vesting() {
+    let prev = StreamState {
+        total_amount: 100,
+        claimed_amount: 0,
+        start_time: 1000,
+        end_time: 2000,
+    };
+    // 60 > vested(1500)=50
+    let next = StreamState {
+        total_amount: 100,
+        claimed_amount: 60,
+        start_time: 1000,
+        end_time: 2000,
+    };
+
+    assert!(!validate_claim(&prev, &next, 1500));
+}
+
+#[test]
+fn validate_claim_rejects_schedule_change() {
+    let prev = StreamState {
+        total_amount: 100,
+        claimed_amount: 0,
+        start_time: 1000,
+        end_time: 2000,
+    };
+    let next = StreamState {
+        total_amount: 100,
+        claimed_amount: 10,
+        start_time: 1100, // changed
+        end_time: 2000,
+    };
+
+    assert!(!validate_claim(&prev, &next, 1500));
 }
