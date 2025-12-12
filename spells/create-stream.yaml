@@ -17,9 +17,12 @@ ins:
 outs:
   # Stream UTXO: carries the StreamState charm for our app
   - address: ${addr_0}
+    amount: ${total_amount}
     charms:
       $00:
         total_amount: ${total_amount}
         claimed_amount: 0
         start_time: ${start_time}
         end_time: ${end_time}
+        # beneficiary_dest is the raw scriptPubKey bytes; pass as base64 or envsubst'ed !!binary
+        beneficiary_dest: !!binary ${beneficiary_dest}

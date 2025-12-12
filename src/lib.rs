@@ -1,4 +1,4 @@
-use charms_sdk::data::{charm_values, check, App, Data, Transaction};
+use charms_sdk::data::{check, App, Charms, Data, NativeOutput, Transaction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -7,6 +7,8 @@ pub struct StreamState {
     pub claimed_amount: u64, // Already claimed
     pub start_time: u64,     // Unix ts (seconds)
     pub end_time: u64,       // Must be > start_time
+    /// Beneficiary's scriptPubKey bytes (native BTC dest). Pinned at create.
+    pub beneficiary_dest: Vec<u8>,
 }
 
 impl StreamState {
@@ -48,16 +50,10 @@ fn stream_contract_satisfied(app: &App, tx: &Transaction, w: &Data) -> bool {
 
     match (ins.len(), outs.len()) {
         // CREATE: 0 input streams, 1 output stream
-        (0, 1) => {
-            check!(validate_create(&outs[0]));
-            true
-        }
+        (0, 1) => validate_create(&outs[0], tx),
 
         // CLAIM: 1 input stream, 1 output stream
-        (1, 1) => {
-            check!(validate_claim(&ins[0], &outs[0], now));
-            true
-        }
+        (1, 1) => validate_claim(&ins[0], &outs[0], tx, now),
 
         // For now: disallow anything else
         _ => {
@@ -71,89 +67,278 @@ fn stream_contract_satisfied(app: &App, tx: &Transaction, w: &Data) -> bool {
     }
 }
 
-fn validate_create(out: &StreamState) -> bool {
-    if out.total_amount == 0 {
+fn validate_create(out: &IndexedStreamState, tx: &Transaction) -> bool {
+    let coins = match coin_outs_required(tx) {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if out.state.total_amount == 0 {
         eprintln!("total_amount must be > 0");
         return false;
     }
-    if out.start_time >= out.end_time {
+    if out.state.start_time >= out.state.end_time {
         eprintln!("start_time must be < end_time");
         return false;
     }
-    if out.claimed_amount != 0 {
+    if out.state.claimed_amount != 0 {
         eprintln!("claimed_amount must be 0 at create");
         return false;
     }
+    if out.state.beneficiary_dest.is_empty() {
+        eprintln!("beneficiary_dest must be provided");
+        return false;
+    }
+
+    // Stream UTXO must actually hold the native coins
+    match coins.get(out.index) {
+        Some(stream_coin) if stream_coin.amount == out.state.total_amount => {}
+        Some(stream_coin) => {
+            eprintln!(
+                "stream output amount mismatch: expected {}, found {}",
+                out.state.total_amount, stream_coin.amount
+            );
+            return false;
+        }
+        None => {
+            eprintln!("missing coin_out for stream output index {}", out.index);
+            return false;
+        }
+    }
+
     true
 }
 
-fn validate_claim(prev: &StreamState, next: &StreamState, now: u64) -> bool {
+fn validate_claim(
+    prev: &StreamState,
+    next: &IndexedStreamState,
+    tx: &Transaction,
+    now: u64,
+) -> bool {
     if now < prev.start_time {
         eprintln!("cannot claim before stream start_time");
         return false;
     }
 
     // same schedule
-    if next.total_amount != prev.total_amount {
+    if next.state.total_amount != prev.total_amount {
         eprintln!("total_amount cannot change");
         return false;
     }
-    if next.start_time != prev.start_time || next.end_time != prev.end_time {
+    if next.state.start_time != prev.start_time || next.state.end_time != prev.end_time {
         eprintln!("stream schedule cannot change");
         return false;
     }
 
     // claimed only moves forward
-    if next.claimed_amount < prev.claimed_amount {
+    if next.state.claimed_amount < prev.claimed_amount {
         eprintln!("claimed_amount cannot decrease");
         return false;
     }
 
     // hard upper bound
-    if next.claimed_amount > next.total_amount {
+    if next.state.claimed_amount > next.state.total_amount {
         eprintln!("claimed_amount cannot exceed total_amount");
         return false;
     }
 
     // no more than vested
     let vested = prev.vested_at(now);
-    if next.claimed_amount > vested {
+    if next.state.claimed_amount > vested {
         eprintln!(
             "claimed_amount {} exceeds vested {} at now={}",
-            next.claimed_amount, vested, now
+            next.state.claimed_amount, vested, now
         );
         return false;
+    }
+
+    if prev.beneficiary_dest != next.state.beneficiary_dest {
+        eprintln!("beneficiary_dest cannot change");
+        return false;
+    }
+    if next.state.beneficiary_dest.is_empty() {
+        eprintln!("beneficiary_dest must be provided");
+        return false;
+    }
+
+    let coins = match coin_outs_required(tx) {
+        Some(c) => c,
+        None => return false,
+    };
+
+    let delta = match next.state.claimed_amount.checked_sub(prev.claimed_amount) {
+        Some(d) => d,
+        None => {
+            eprintln!("claimed_amount must not decrease");
+            return false;
+        }
+    };
+
+    // Payout must exist and be exact
+    let payout_ok = coins.iter().any(|o| {
+        o.dest == next.state.beneficiary_dest && o.amount == delta
+    });
+    if !payout_ok {
+        eprintln!(
+            "payout output missing or mismatched: dest len {}, amount {}",
+            next.state.beneficiary_dest.len(),
+            delta
+        );
+        return false;
+    }
+
+    // Remaining balance must stay with the stream output index
+    let expected_remaining = next
+        .state
+        .total_amount
+        .saturating_sub(next.state.claimed_amount);
+    match coins.get(next.index) {
+        Some(stream_coin) if stream_coin.amount == expected_remaining => {}
+        Some(stream_coin) => {
+            eprintln!(
+                "stream remainder mismatch: expected {}, found {}",
+                expected_remaining, stream_coin.amount
+            );
+            return false;
+        }
+        None => {
+            eprintln!("missing coin_out for updated stream output index {}", next.index);
+            return false;
+        }
     }
 
     true
 }
 
 fn stream_states_in(app: &App, tx: &Transaction) -> Vec<StreamState> {
-    // Inputs: tx.ins is Vec<(UtxoId, Data)>
-    charm_values(app, tx.ins.iter().map(|(_, v)| v))
-        .filter_map(|data| data.value::<StreamState>().ok())
+    tx.ins
+        .iter()
+        .filter_map(|(_, charms)| stream_state_in_charms(app, charms))
         .collect()
 }
 
-fn stream_states_out(app: &App, tx: &Transaction) -> Vec<StreamState> {
-    // Outputs: tx.outs is Vec<Data>
-    charm_values(app, tx.outs.iter())
-        .filter_map(|data| data.value::<StreamState>().ok())
+fn stream_states_out(app: &App, tx: &Transaction) -> Vec<IndexedStreamState> {
+    tx.outs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, charms)| {
+            stream_state_in_charms(app, charms).map(|state| IndexedStreamState {
+                state,
+                index: i,
+            })
+        })
         .collect()
+}
+
+fn stream_state_in_charms(app: &App, charms: &Charms) -> Option<StreamState> {
+    charms
+        .get(app)
+        .and_then(|data| data.value::<StreamState>().ok())
+}
+
+fn coin_outs_required(tx: &Transaction) -> Option<&Vec<NativeOutput>> {
+    let Some(coins) = tx.coin_outs.as_ref() else {
+        eprintln!("tx.coin_outs missing; expected native amounts present");
+        return None;
+    };
+    if coins.len() != tx.outs.len() {
+        eprintln!(
+            "coin_outs length {} does not match outs length {}",
+            coins.len(),
+            tx.outs.len()
+        );
+        return None;
+    }
+    Some(coins)
+}
+
+#[derive(Clone, Debug)]
+struct IndexedStreamState {
+    state: StreamState,
+    index: usize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use charms_sdk::data::{B32, TxId, UtxoId};
+    use std::collections::BTreeMap;
+
+    fn dummy_app() -> App {
+        App {
+            tag: 'n',
+            identity: B32([1u8; 32]),
+            vk: B32([2u8; 32]),
+        }
+    }
+
+    fn beneficiary() -> Vec<u8> {
+        vec![0x51, 0x21]
+    }
+
+    fn stream_dest() -> Vec<u8> {
+        vec![0x76, 0xa9]
+    }
+
+    fn stream_state(total: u64, claimed: u64) -> StreamState {
+        StreamState {
+            total_amount: total,
+            claimed_amount: claimed,
+            start_time: 1_000,
+            end_time: 2_000,
+            beneficiary_dest: beneficiary(),
+        }
+    }
+
+    fn native_output(dest: Vec<u8>, amount: u64) -> NativeOutput {
+        NativeOutput { amount, dest }
+    }
+
+    fn tx(
+        app: &App,
+        ins_states: Vec<StreamState>,
+        outs_states: Vec<Option<StreamState>>,
+        coin_outs: Vec<NativeOutput>,
+    ) -> Transaction {
+        let ins = ins_states
+            .into_iter()
+            .enumerate()
+            .map(|(i, state)| {
+                (
+                    UtxoId(TxId([i as u8; 32]), i as u32),
+                    charms_with_state(app, state),
+                )
+            })
+            .collect();
+
+        let outs = outs_states
+            .into_iter()
+            .map(|maybe_state| match maybe_state {
+                Some(state) => charms_with_state(app, state),
+                None => BTreeMap::new(),
+            })
+            .collect();
+
+        Transaction {
+            ins,
+            refs: vec![],
+            outs,
+            coin_ins: None,
+            coin_outs: Some(coin_outs),
+            prev_txs: BTreeMap::new(),
+            app_public_inputs: BTreeMap::new(),
+        }
+    }
+
+    fn charms_with_state(app: &App, state: StreamState) -> Charms {
+        let mut c = BTreeMap::new();
+        c.insert(app.clone(), Data::from(&state));
+        c
+    }
 
     #[test]
     fn test_vested_at_linear() {
-        let s = StreamState {
-            total_amount: 100,
-            claimed_amount: 0,
-            start_time: 1000,
-            end_time: 2000,
-        };
+        let s = stream_state(100, 0);
 
         assert_eq!(s.vested_at(900), 0);
         assert_eq!(s.vested_at(1000), 0);
@@ -161,82 +346,67 @@ mod tests {
         assert_eq!(s.vested_at(2000), 100);
         assert_eq!(s.vested_at(2100), 100);
     }
-}
 
-#[test]
-fn validate_create_rejects_zero_total() {
-    let s = StreamState {
-        total_amount: 0,
-        claimed_amount: 0,
-        start_time: 1000,
-        end_time: 2000,
-    };
-    assert!(!validate_create(&s));
-}
+    #[test]
+    fn validate_create_requires_amount_and_beneficiary() {
+        let app = dummy_app();
+        let stream = stream_state(100, 0);
+        let coins = vec![native_output(stream_dest(), 100)];
+        let tx = tx(&app, vec![], vec![Some(stream.clone())], coins);
+        let outs = stream_states_out(&app, &tx);
+        assert_eq!(outs.len(), 1);
+        assert!(validate_create(&outs[0], &tx));
+    }
 
-#[test]
-fn validate_create_rejects_claimed_nonzero() {
-    let s = StreamState {
-        total_amount: 100,
-        claimed_amount: 1,
-        start_time: 1000,
-        end_time: 2000,
-    };
-    assert!(!validate_create(&s));
-}
+    #[test]
+    fn claim_rejects_over_vesting() {
+        let app = dummy_app();
+        let prev = stream_state(100, 0);
+        let next = stream_state(100, 60); // vested(1500)=50, so reject
 
-#[test]
-fn validate_claim_happy_path() {
-    let prev = StreamState {
-        total_amount: 100,
-        claimed_amount: 0,
-        start_time: 1000,
-        end_time: 2000,
-    };
-    // at now=1500, vested=50
-    let next = StreamState {
-        total_amount: 100,
-        claimed_amount: 50,
-        start_time: 1000,
-        end_time: 2000,
-    };
+        let outs = vec![None, Some(next.clone())];
+        let coins = vec![
+            native_output(beneficiary(), 60),
+            native_output(stream_dest(), 40),
+        ];
+        let tx = tx(&app, vec![prev.clone()], outs, coins);
+        let outs_indexed = stream_states_out(&app, &tx);
+        assert_eq!(outs_indexed.len(), 1);
+        assert!(!validate_claim(&prev, &outs_indexed[0], &tx, 1500));
+    }
 
-    assert!(validate_claim(&prev, &next, 1500));
-}
+    #[test]
+    fn claim_rejects_payout_mismatch() {
+        let app = dummy_app();
+        let prev = stream_state(100, 20);
+        let next = stream_state(100, 50);
 
-#[test]
-fn validate_claim_rejects_over_vesting() {
-    let prev = StreamState {
-        total_amount: 100,
-        claimed_amount: 0,
-        start_time: 1000,
-        end_time: 2000,
-    };
-    // 60 > vested(1500)=50
-    let next = StreamState {
-        total_amount: 100,
-        claimed_amount: 60,
-        start_time: 1000,
-        end_time: 2000,
-    };
+        // wrong dest (stream_dest instead of beneficiary)
+        let outs = vec![None, Some(next.clone())];
+        let coins = vec![
+            native_output(stream_dest(), 30),
+            native_output(stream_dest(), 50),
+        ];
+        let tx = tx(&app, vec![prev.clone()], outs, coins);
+        let outs_indexed = stream_states_out(&app, &tx);
+        assert_eq!(outs_indexed.len(), 1);
+        assert!(!validate_claim(&prev, &outs_indexed[0], &tx, 1_500));
+    }
 
-    assert!(!validate_claim(&prev, &next, 1500));
-}
+    #[test]
+    fn claim_rejects_remainder_mismatch() {
+        let app = dummy_app();
+        let prev = stream_state(100, 20);
+        let next = stream_state(100, 50); // delta=30, remainder=50
 
-#[test]
-fn validate_claim_rejects_schedule_change() {
-    let prev = StreamState {
-        total_amount: 100,
-        claimed_amount: 0,
-        start_time: 1000,
-        end_time: 2000,
-    };
-    let next = StreamState {
-        total_amount: 100,
-        claimed_amount: 10,
-        start_time: 1100, // changed
-        end_time: 2000,
-    };
-
-    assert!(!validate_claim(&prev, &next, 1500));
+        let outs = vec![None, Some(next.clone())];
+        let coins = vec![
+            native_output(beneficiary(), 30),
+            native_output(stream_dest(), 55), // wrong remainder
+        ];
+        let tx = tx(&app, vec![prev.clone()], outs, coins);
+        let outs_indexed = stream_states_out(&app, &tx);
+        assert_eq!(outs_indexed.len(), 1);
+        assert!(!validate_claim(&prev, &outs_indexed[0], &tx, 1_500));
+    }
 }
