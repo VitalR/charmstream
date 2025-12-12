@@ -1,38 +1,60 @@
-This is a [Charms](https://charms.dev) app.
+CharmStream is a programmable BTC streaming / vesting primitive built on [Charms](https://charms.dev) (BitcoinOS). A payer creates a stream UTXO, and the beneficiary can claim vested sats over time. The WASM app enforces both the vesting schedule and the native BTC movement using `tx.coin_outs`.
 
-It is a simple fungible token managed by a reference NFT. The NFT has a state that specifies the remaining total supply of the tokens available to mint. If you control the NFT, you can mint new tokens.
-
-NOTE: you may need to install Wasm WASI P1 support:
+## Quick start
 
 ```sh
 rustup target add wasm32-wasip1
-```
-
-Build with:
-```sh
 cargo update
-app_bin=$(charms app build)
+make build
 ```
 
-The resulting Wasm binary will show up at `./target/wasm32-wasip1/release/charmstream.wasm`.
+Useful helper to derive the base64 scriptPubKey for an address (used as `beneficiary_dest`):
 
-Get the verification key for the app with:
 ```sh
-charms app vk $app_bin
+BITCOIN_CHAIN=testnet4 scripts/address_to_spk_base64.sh <beneficiary_bech32>
 ```
 
-Test the app with a simple NFT mint example:
+## Environment you need for spells
+
+Set these in your shell before running `make check-*` / `make prove-*`:
+
+- `app_id`, `app_vk`, `app_bin` (or rely on `make build` to set `APP_BIN`)
+- `in_utxo_0` (funding UTXO for create), `stream_utxo_0` (existing stream for claim)
+- `addr_0` (stream UTXO address), `beneficiary_addr` (payout address)
+- `beneficiary_dest` (base64 scriptPubKey bytes of `beneficiary_addr`)
+- `total_amount`, `start_time`, `end_time`, `claimed_before`, `claimed_after`, `payout_sats`, `remaining_sats`, `now`
+- `PREV_TXS` raw hex blobs for inputs you are spending (comma separated if multiple)
+
+## Spells
+
+- `spells/create-stream.yaml` – creates the stream UTXO with native BTC amount and StreamState.
+- `spells/claim-stream.yaml` – pays the beneficiary and rolls the stream forward, with strict native coin checks.
+
+Run checks / proofs:
 
 ```sh
-export app_vk=$(charms app vk)
+make check-create
+make prove-create      # writes .build/create.raw
+make check-claim
+make prove-claim       # writes .build/claim.raw
+```
 
-# set to a UTXO you're spending (you can see what you have by running `b listunspent`)
-export in_utxo_0="d8fa4cdade7ac3dff64047dc73b58591ebe638579881b200d4fea68fc84521f0:0"
+Broadcast using your local bitcoin node on testnet4:
 
-export app_id=$(echo -n "${in_utxo_0}" | sha256sum | cut -d' ' -f1)
-export addr_0="tb1p3w06fgh64axkj3uphn4t258ehweccm367vkdhkvz8qzdagjctm8qaw2xyv"
+```sh
+make broadcast-create
+make broadcast-claim
+```
 
-prev_txs=02000000000101a3a4c09a03f771e863517b8169ad6c08784d419e6421015e8c360db5231871eb0200000000fdffffff024331070000000000160014555a971f96c15bd5ef181a140138e3d3c960d6e1204e0000000000002251207c4bb238ab772a2000906f3958ca5f15d3a80d563f17eb4123c5b7c135b128dc0140e3d5a2a8c658ea8a47de425f1d45e429fbd84e68d9f3c7ff9cd36f1968260fa558fe15c39ac2c0096fe076b707625e1ae129e642a53081b177294251b002ddf600000000
+## Notes on beneficiary_dest
 
-cat ./spells/mint-nft.yaml | envsubst | charms spell check --prev-txs=${prev_txs} --app-bins=${app_bin}
+The contract stores the beneficiary scriptPubKey bytes and enforces:
+
+- Payout output must exactly match `beneficiary_dest` and the claimed delta.
+- Stream output must keep the remaining sats.
+
+Use `scripts/address_to_spk_base64.sh` to get the base64 blob, then export:
+
+```sh
+export beneficiary_dest=$(BITCOIN_CHAIN=testnet4 scripts/address_to_spk_base64.sh tb1...beneficiary)
 ```
