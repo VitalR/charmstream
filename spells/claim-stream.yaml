@@ -1,0 +1,31 @@
+version: 8
+
+apps:
+  $00: n/${app_id}/${app_vk}
+
+private_inputs:
+  $00: ${now}
+
+ins:
+  - utxo_id: ${stream_utxo_0}
+    charms:
+      $00:
+        total_amount: ${total_amount}
+        claimed_amount: ${claimed_before}
+        start_time: ${start_time}
+        end_time: ${end_time}
+
+outs:
+  # (1) payout to beneficiary (no charms)
+  - address: ${beneficiary_addr}
+    # Depending on the spell schema, you will set amount/value here
+    # value: ${payout_sats}
+
+  # (2) updated stream UTXO (keeps remaining BTC + updated StreamState)
+  - address: ${addr_0}
+    charms:
+      $00:
+        total_amount: ${total_amount}
+        claimed_amount: ${claimed_after}
+        start_time: ${start_time}
+        end_time: ${end_time}
