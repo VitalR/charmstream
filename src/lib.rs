@@ -7,8 +7,28 @@ pub struct StreamState {
     pub claimed_amount: u64, // Already claimed
     pub start_time: u64,     // Unix ts (seconds)
     pub end_time: u64,       // Must be > start_time
-    /// Beneficiary's scriptPubKey bytes (native BTC dest). Pinned at create.
+    /// Beneficiary's scriptPubKey as hex string. Pinned at create.
+    #[serde(with = "hex_string")]
     pub beneficiary_dest: Vec<u8>,
+}
+
+mod hex_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+    
+    pub fn serialize<S>(data: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(data))
+    }
+    
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        hex::decode(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 impl StreamState {

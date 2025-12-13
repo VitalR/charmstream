@@ -12,6 +12,7 @@ private_inputs:
 ins:
   # Funding UTXO – no stream charm yet
   - utxo_id: ${in_utxo_0}
+    charms: {}
 
 # ---- Transaction outputs ----
 outs:
@@ -24,5 +25,5 @@ outs:
         claimed_amount: 0
         start_time: ${start_time}
         end_time: ${end_time}
-        # beneficiary_dest is the raw scriptPubKey bytes; pass as base64 or envsubst'ed !!binary
-        beneficiary_dest: !!binary ${beneficiary_dest}
+        # beneficiary_dest is the scriptPubKey as hex string
+        beneficiary_dest: ${beneficiary_dest_hex}
