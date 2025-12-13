@@ -67,6 +67,7 @@ name = "charmstream"
 version = "0.1.0"
 dependencies = [
  "charms-sdk",
+ "hex",
  "serde",
  "sha2",
 ]
