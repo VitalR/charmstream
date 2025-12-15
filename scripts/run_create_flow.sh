@@ -13,10 +13,10 @@ echo "  app_vk: $app_vk"
 
 # 2. Pick UTXO
 echo ""
-echo "[2/9] Listing your UTXOs..."
-bitcoin-cli listunspent | jq -r '.[] | "\(.txid):\(.vout) -> \(.amount) BTC (\(.address))"'
+echo "[2/9] Listing your UTXOs (including unconfirmed)..."
+bitcoin-cli listunspent 0 9999999 | jq -r '.[] | "[\(.confirmations) conf] \(.txid):\(.vout) -> \(.amount) BTC"' | sort -rn
 echo ""
-echo "⚠️  WARNING: Pick a FRESH UTXO that hasn't been used in previous attempts!"
+echo "WARNING: Pick a FRESH UTXO that hasn't been used in previous attempts!"
 echo "   (If you see 'duplicate funding UTXO' error, the UTXO was already tried)"
 echo ""
 read -p "Enter UTXO to spend (format: txid:vout): " in_utxo_0
@@ -117,21 +117,40 @@ echo ""
 echo "=== Proof generated successfully! ==="
 echo ""
 echo "Extracting hex from JSON output..."
-if ! jq -r '.[1].bitcoin' .build/create.raw > .build/create.hex 2>/dev/null; then
+if ! tail -1 .build/create.raw | jq -r '.[1].bitcoin' > .build/create.hex 2>/dev/null; then
   echo "ERROR: Could not extract hex from prove output"
   cat .build/create.raw
   exit 1
 fi
-echo "Raw transaction saved to: .build/create.hex"
+echo "Transaction hex extracted ($(wc -c < .build/create.hex | tr -d ' ') bytes)"
 echo ""
-echo "To decode and inspect:"
-echo "  bitcoin-cli decoderawtransaction \$(cat .build/create.hex) | jq"
-echo ""
-echo "To broadcast:"
-echo "  bitcoin-cli sendrawtransaction \$(cat .build/create.hex)"
-echo ""
-echo "After broadcasting, note the txid and find the stream output index (usually 0)."
-echo "Then set: export stream_utxo_0=\"TXID:INDEX\""
+
+# Auto-broadcast
+echo "Broadcasting transaction..."
+if STREAM_TXID=$(bitcoin-cli sendrawtransaction $(cat .build/create.hex) 2>&1); then
+  echo ""
+  echo "=== CREATE STREAM SUCCESS ==="
+  echo ""
+  echo "Stream TXID: $STREAM_TXID"
+  echo "Stream UTXO: $STREAM_TXID:0"
+  echo ""
+  echo "View on explorer:"
+  echo "https://mempool.space/testnet4/tx/$STREAM_TXID"
+  echo ""
+  
+  # Export for claim flow
+  export STREAM_TXID
+  export stream_utxo_0="$STREAM_TXID:0"
+else
+  echo ""
+  echo "ERROR: Broadcast failed: $STREAM_TXID"
+  echo ""
+  echo "Common causes:"
+  echo "  - Funding UTXO was spent by another user (race condition)"
+  echo "  - Parent tx not in network mempool yet"
+  echo "  - Try running the script again immediately"
+  exit 1
+fi
 echo ""
 echo "=== Environment variables for claim flow ==="
 echo "export app_bin=\"$app_bin\""

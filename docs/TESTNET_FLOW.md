@@ -18,31 +18,45 @@ cd /Users/vital/workspace/hackathon/bitcoinos/charmstream
 ```
 
 This script will:
+
 - Build the WASM app
+- List your available UTXOs (both confirmed and unconfirmed)
 - Let you pick a funding UTXO
 - Ask for stream parameters (amount, duration, addresses)
-- Derive all required values
-- Check and prove the spell
-- Save the raw transaction to `.build/create.raw`
+- Derive all required values (scriptPubKey, app_id, etc.)
+- Generate a zk proof via Charms server
+- **Automatically broadcast the transaction immediately**
+- Display the transaction ID and mempool.space link
 
-**After the script completes:**
+**Important Notes:**
 
-1. Inspect the transaction:
-   ```bash
-   bitcoin-cli decoderawtransaction $(cat .build/create.raw) | jq
-   ```
+**WARNING: Use CONFIRMED UTXOs only** (at least 1 confirmation). Unconfirmed UTXOs will fail when broadcasting.
 
-2. Broadcast when ready:
-   ```bash
-   bitcoin-cli sendrawtransaction $(cat .build/create.raw)
-   ```
+**WARNING: Use FRESH UTXOs** that haven't been used in previous `charms spell prove` attempts. The Charms server caches proof attempts and will reject reused UTXOs with "duplicate funding UTXO" error.
 
-3. Note the returned txid and find the stream output index (usually 0).
+**WARNING: Minimum amount**: Set stream amount to at least 5000 sats to avoid dust errors after fees.
 
-4. Export the stream UTXO for the claim flow:
-   ```bash
-   export stream_utxo_0="TXID:OUTPUT_INDEX"
-   ```
+**After successful broadcast:**
+
+The script outputs the stream TXID and UTXO. Export these for the claim flow:
+
+```bash
+export STREAM_TXID="<txid_from_output>"
+export stream_utxo_0="$STREAM_TXID:0"
+```
+
+**To verify on-chain:**
+
+```bash
+# Check if transaction is in mempool
+bitcoin-cli getmempoolentry $STREAM_TXID
+
+# View transaction details
+bitcoin-cli getrawtransaction $STREAM_TXID 1 | jq
+
+# View on block explorer
+https://mempool.space/testnet4/tx/$STREAM_TXID
+```
 
 ### Step 2: Claim from Stream
 
@@ -53,29 +67,50 @@ Run the automated claim flow script:
 ```
 
 This script will:
+
 - Verify all required env vars from create flow
-- Let you specify the stream UTXO and claim amount
-- Calculate vested amount automatically
-- Ask for a fee funding UTXO
-- Check and prove the claim spell
-- Save the raw transaction to `.build/claim.raw`
+- Let you specify the stream UTXO
+- Calculate vested amount automatically based on current time
+- Validate your claim amount doesn't exceed vested
+- Ask for a fee funding UTXO (must be FRESH and CONFIRMED)
+- Generate a zk proof for the claim
+- **Automatically broadcast the claim transaction**
+- Display the claim TXID and updated stream UTXO
 
-**After the script completes:**
+**Important Notes:**
 
-1. Inspect the claim transaction:
-   ```bash
-   bitcoin-cli decoderawtransaction $(cat .build/claim.raw) | jq '.vout[] | {n,value,addr:.scriptPubKey.addresses}'
-   ```
+**WARNING: Wait for stream UTXO to confirm** before claiming (at least 1 confirmation).
 
-2. Verify outputs:
-   - Output 0: Payout to beneficiary (should match `payout_sats`)
-   - Output 1: Updated stream (should match `remaining_sats`)
-   - Output 2+: Change outputs
+**WARNING: Use FRESH fee funding UTXO** that hasn't been used in previous proof attempts.
 
-3. Broadcast when ready:
-   ```bash
-   bitcoin-cli sendrawtransaction $(cat .build/claim.raw)
-   ```
+**WARNING: Claim amount must be less than or equal to vested amount**. The script calculates this for you using:
+
+```
+vested = total_amount × (now - start_time) / (end_time - start_time)
+```
+
+**After successful broadcast:**
+
+The script outputs:
+
+- Claim TXID
+- Updated stream UTXO (for next claim)
+- Amount claimed and remaining
+
+**To verify the claim:**
+
+```bash
+# View claim transaction
+bitcoin-cli getrawtransaction $CLAIM_TXID 1 | jq '.vout'
+
+# Verify outputs:
+# [0] = Payout to beneficiary (your claimed sats)
+# [1] = Updated stream (remaining unvested sats)
+# [2+] = Change outputs
+
+# Check on explorer
+https://mempool.space/testnet4/tx/$CLAIM_TXID
+```
 
 ## Manual Flow (Step-by-Step)
 
@@ -181,47 +216,133 @@ bitcoin-cli sendrawtransaction $(cat .build/claim.raw)
 
 ## Troubleshooting
 
+### CRITICAL: "duplicate funding UTXO spend with different spell"
+
+**Problem**: The Charms proof server caches proof attempts. Once you use a UTXO in `charms spell prove`, it's marked as "used" even if you never broadcast the transaction. If you change any parameter (amount, duration, app code, etc.) and try to prove again with the same UTXO, you'll get this error.
+
+**Solution**:
+
+1. **Use a completely fresh UTXO** that has NEVER been used in any prove attempt
+2. Generate a new address: `bitcoin-cli getnewaddress "" "bech32m"`
+3. Send funds to it: `bitcoin-cli sendtoaddress <new_addr> 0.0005`
+4. Wait for 1 confirmation
+5. Use this new UTXO in your next prove attempt
+
+**Prevention**: Only run `prove` when you're ready to broadcast immediately. Don't experiment with different parameters on the same UTXO.
+
+### "bad-txns-inputs-missingorspent"
+
+**Problem**: The transaction references UTXOs that don't exist on the network or are already spent.
+
+**Common causes**:
+
+1. **Unconfirmed parent UTXO**: You're trying to spend a UTXO that hasn't confirmed yet
+2. **Stale Charms funding UTXO**: The Charms server provided a funding UTXO for your proof, but another user spent it before you broadcast
+3. **Already spent your UTXO**: You used the same UTXO in a previous transaction
+
+**Solution**:
+
+- **Always use confirmed UTXOs** (at least 1 confirmation)
+- **Broadcast immediately after proof generation** (our scripts do this automatically now)
+- Check UTXO status: `bitcoin-cli gettxout <txid> <vout>`
+
+### "dust" error code -26
+
+**Problem**: One of your transaction outputs is below Bitcoin's dust threshold (~546 sats for witness outputs).
+
+**Solution**:
+
+- Set stream amount to at least **5000 sats** to ensure outputs remain above dust after fees
+- The automated scripts enforce this minimum
+
 ### "unexpected number of stream states: in=0, out=0"
 
-This happens if you run `charms spell check` on our spells. Our contract validates native BTC amounts via `tx.coin_outs`, which is only populated during `spell prove` (when funding info is available). **Solution**: Skip `spell check` and go straight to `spell prove`.
+**Problem**: You're running `charms spell check` on our spells. Our contract validates native BTC amounts via `tx.coin_outs`, which is only populated during `spell prove` (when funding and coin info is available).
 
-### "Invalid combination of chain flags"
+**Solution**: Skip `charms spell check` and go straight to `charms spell prove`. The automated scripts do this correctly.
 
-Your bitcoin.conf has a chain set. Use `bitcoin-cli` without any `-chain` flag:
+### "TX decode failed. Make sure the tx has at least one input."
+
+**Problem**: The `charms spell prove` output is JSON format, but you're trying to broadcast the raw JSON instead of extracting the hex.
+
+**Solution**: Extract the Bitcoin transaction hex from the JSON output:
+
 ```bash
-bitcoin-cli getaddressinfo ...
+tail -1 .build/create.raw | jq -r '.[1].bitcoin' > .build/create.hex
+bitcoin-cli sendrawtransaction $(cat .build/create.hex)
+```
+
+The automated scripts handle this correctly.
+
+### "Invalid combination of chain flags" (bitcoin-cli error)
+
+**Problem**: Your `bitcoin.conf` already sets `testnet4=1`, and you're passing `-chain=testnet4` to `bitcoin-cli`, creating a conflict.
+
+**Solution**: Use `bitcoin-cli` without any chain flag:
+
+```bash
+bitcoin-cli getaddressinfo <address>  # NOT: bitcoin-cli -chain=testnet4 ...
 ```
 
 ### "sha256sum: command not found" (macOS)
 
-Use `shasum` instead:
+**Problem**: macOS doesn't have `sha256sum`, it uses `shasum` instead.
+
+**Solution**:
+
 ```bash
 export app_id=$(printf "%s" "$in_utxo_0" | shasum -a 256 | cut -d' ' -f1)
 ```
 
-### "unexpected number of stream states: in=0, out=0"
+### Testnet4 blocks taking too long
 
-You're missing funding flags. Make sure to include:
-- `--funding-utxo`
-- `--funding-utxo-value`
-- `--change-address`
+**Problem**: Testnet4 can have irregular block times, sometimes 30+ minutes between blocks.
 
-### "UTXO not found or already spent"
+**Solution**:
 
-The UTXO was spent. Pick a different one from `bitcoin-cli listunspent`.
+- Check recent blocks: `bitcoin-cli getblockcount` and `bitcoin-cli getblock <hash>`
+- Verify your tx is in mempool: `bitcoin-cli getmempoolentry <txid>`
+- Wait patiently, or try mining yourself if you have testnet mining setup
+- Use block explorer: https://mempool.space/testnet4/
 
 ### Claim amount exceeds vested
 
-Wait longer or reduce claim amount. Vested amount is linear:
+**Problem**: You're trying to claim more than has vested according to the schedule.
+
+**Solution**:
+
+- Wait longer for more to vest, or
+- Reduce claim amount
+- Vested calculation (linear):
+  ```
+  vested = total_amount × (now - start_time) / (end_time - start_time)
+  ```
+
+### How to get fresh UTXOs without waiting for faucet
+
+**Problem**: All your UTXOs are "tainted" by previous prove attempts.
+
+**Solution**: Send from your existing wallet to a new address:
+
+```bash
+# Generate new address
+NEW_ADDR=$(bitcoin-cli getnewaddress "" "bech32m")
+
+# Send 50k sats to it
+bitcoin-cli sendtoaddress "$NEW_ADDR" 0.0005
+
+# Wait for 1 confirmation (~10-20 min on testnet4)
+bitcoin-cli listunspent 1 | grep "$NEW_ADDR"
 ```
-vested = total_amount * (now - start_time) / (end_time - start_time)
-```
+
+This reuses your existing testnet BTC instead of requesting more from faucets.
 
 ## Verification
 
 After broadcasting each transaction:
 
 1. Check mempool:
+
    ```bash
    bitcoin-cli getmempoolentry TXID
    ```
@@ -229,6 +350,7 @@ After broadcasting each transaction:
 2. View on explorer (if available for testnet4)
 
 3. Decode outputs:
+
    ```bash
    bitcoin-cli decoderawtransaction $(cat .build/create.raw) | jq
    bitcoin-cli decoderawtransaction $(cat .build/claim.raw) | jq
@@ -243,4 +365,3 @@ After broadcasting each transaction:
 - Time is Unix epoch (seconds)
 - The contract enforces exact payout to beneficiary and exact remainder to stream
 - Fees come from the funding UTXO (for prove) or additional inputs (for claim)
-
