@@ -98,6 +98,10 @@ echo "[4/6] Select fee funding UTXO..."
 bitcoin-cli listunspent | jq -r '.[] | select(.txid != "'$stream_txid'") | "\(.txid):\(.vout) -> \(.amount) BTC"'
 echo ""
 read -p "Enter fee funding UTXO (format: txid:vout): " fee_utxo
+if [ "$fee_utxo" = "$stream_utxo_0" ]; then
+  echo "ERROR: Fee UTXO must differ from stream UTXO."
+  exit 1
+fi
 
 fee_txid=$(echo "$fee_utxo" | cut -d: -f1)
 fee_vout=$(echo "$fee_utxo" | cut -d: -f2)
@@ -109,21 +113,21 @@ echo "  Fee UTXO value: $fee_value_sats sats"
 export funding_utxo="$fee_utxo"
 export funding_value_sats="$fee_value_sats"
 
-# 5. Fetch prev txs
+# 5. Fetch prev txs (deduplicate if same parent)
 echo ""
 echo "[5/6] Fetching previous transactions..."
 bitcoin-cli getrawtransaction "$stream_txid" > /tmp/prev_stream.hex
-bitcoin-cli getrawtransaction "$fee_txid" > /tmp/prev_fee.hex
 
-# Concatenate with newline
-{
-  cat /tmp/prev_stream.hex
-  echo ""
-  cat /tmp/prev_fee.hex
-} > /tmp/prev_all.hex
-
-export PREV_TXS=$(cat /tmp/prev_all.hex)
-echo "  Prev txs fetched"
+if [ "$stream_txid" = "$fee_txid" ]; then
+  # Same parent tx, only include once
+  export PREV_TXS="$(tr -d '\n' < /tmp/prev_stream.hex)"
+  echo "  Prev tx fetched (shared parent)"
+else
+  # Different parent txs, include both comma-separated
+  bitcoin-cli getrawtransaction "$fee_txid" > /tmp/prev_fee.hex
+  export PREV_TXS="$(tr -d '\n' < /tmp/prev_stream.hex),$(tr -d '\n' < /tmp/prev_fee.hex)"
+  echo "  Prev txs fetched (stream + fee)"
+fi
 
 # 6. Prove spell (skip check since our contract needs coin_outs which check doesn't populate)
 echo ""

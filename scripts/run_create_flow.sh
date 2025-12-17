@@ -16,25 +16,43 @@ echo ""
 echo "[2/9] Listing your UTXOs (including unconfirmed)..."
 bitcoin-cli listunspent 0 9999999 | jq -r '.[] | "[\(.confirmations) conf] \(.txid):\(.vout) -> \(.amount) BTC"' | sort -rn
 echo ""
-echo "WARNING: Pick a FRESH UTXO that hasn't been used in previous attempts!"
-echo "   (If you see 'duplicate funding UTXO' error, the UTXO was already tried)"
+echo "WARNING: Pick FRESH UTXOs that haven't been used in previous attempts!"
+echo "   - One UTXO funds the stream (locked into StreamState)"
+echo "   - A different UTXO funds fees/change (funding_utxo)"
 echo ""
-read -p "Enter UTXO to spend (format: txid:vout): " in_utxo_0
-export in_utxo_0
-
-# 3. Get UTXO value
-txid=$(echo "$in_utxo_0" | cut -d: -f1)
-vout=$(echo "$in_utxo_0" | cut -d: -f2)
-echo ""
-echo "[3/9] Fetching UTXO details..."
-utxo_info=$(bitcoin-cli gettxout "$txid" "$vout")
-if [ -z "$utxo_info" ] || [ "$utxo_info" = "null" ]; then
-  echo "ERROR: UTXO not found or already spent!"
+read -p "Enter STREAM UTXO (format: txid:vout): " stream_utxo_0
+read -p "Enter FEE FUNDING UTXO (format: txid:vout, must differ): " funding_utxo
+if [ "$stream_utxo_0" = "$funding_utxo" ]; then
+  echo "ERROR: Stream UTXO and funding UTXO must be different."
   exit 1
 fi
-utxo_value_btc=$(echo "$utxo_info" | jq -r '.value')
-export funding_value_sats=$(python3 -c "print(int(float('$utxo_value_btc') * 1e8))")
-echo "  UTXO value: $funding_value_sats sats"
+export stream_utxo_0
+export funding_utxo
+export in_utxo_0="$stream_utxo_0"
+
+# 3. Get UTXO values
+stream_txid=$(echo "$stream_utxo_0" | cut -d: -f1)
+stream_vout=$(echo "$stream_utxo_0" | cut -d: -f2)
+fund_txid=$(echo "$funding_utxo" | cut -d: -f1)
+fund_vout=$(echo "$funding_utxo" | cut -d: -f2)
+echo ""
+echo "[3/9] Fetching UTXO details..."
+stream_info=$(bitcoin-cli gettxout "$stream_txid" "$stream_vout")
+fund_info=$(bitcoin-cli gettxout "$fund_txid" "$fund_vout")
+if [ -z "$stream_info" ] || [ "$stream_info" = "null" ]; then
+  echo "ERROR: Stream UTXO not found or already spent!"
+  exit 1
+fi
+if [ -z "$fund_info" ] || [ "$fund_info" = "null" ]; then
+  echo "ERROR: Funding UTXO not found or already spent!"
+  exit 1
+fi
+stream_value_btc=$(echo "$stream_info" | jq -r '.value')
+fund_value_btc=$(echo "$fund_info" | jq -r '.value')
+export stream_value_sats=$(python3 -c "print(int(float('$stream_value_btc') * 1e8))")
+export funding_value_sats=$(python3 -c "print(int(float('$fund_value_btc') * 1e8))")
+echo "  Stream UTXO value:  $stream_value_sats sats"
+echo "  Funding UTXO value: $funding_value_sats sats"
 
 # 4. Set stream parameters
 echo ""
@@ -81,16 +99,25 @@ echo "  beneficiary_dest_hex: ${beneficiary_dest_hex}"
 
 # 7. Derive app_id
 echo ""
-echo "[7/9] Deriving app_id from funding UTXO..."
-export app_id=$(printf "%s" "$in_utxo_0" | shasum -a 256 | cut -d' ' -f1)
+echo "[7/9] Deriving app_id from stream UTXO..."
+export app_id=$(printf "%s" "$stream_utxo_0" | shasum -a 256 | cut -d' ' -f1)
 echo "  app_id: $app_id"
 
-# 8. Fetch prev tx
+# 8. Fetch prev tx (deduplicate if same parent)
 echo ""
 echo "[8/9] Fetching previous transaction..."
-bitcoin-cli getrawtransaction "$txid" > /tmp/prev0.hex
-export PREV_TXS=$(cat /tmp/prev0.hex)
-echo "  Prev tx fetched ($(wc -c < /tmp/prev0.hex) bytes)"
+bitcoin-cli getrawtransaction "$stream_txid" > /tmp/prev_stream.hex
+
+if [ "$stream_txid" = "$fund_txid" ]; then
+  # Same parent tx, only include once
+  export PREV_TXS="$(tr -d '\n' < /tmp/prev_stream.hex)"
+  echo "  Prev tx fetched (shared parent)"
+else
+  # Different parent txs, include both
+  bitcoin-cli getrawtransaction "$fund_txid" > /tmp/prev_fund.hex
+  export PREV_TXS="$(tr -d '\n' < /tmp/prev_stream.hex),$(tr -d '\n' < /tmp/prev_fund.hex)"
+  echo "  Prev txs fetched (stream + funding)"
+fi
 
 # 9. Prove spell (skip check since our contract needs coin_outs which check doesn't populate)
 echo ""
@@ -99,7 +126,7 @@ mkdir -p .build
 
 echo "  Running spell prove (this may take a minute)..."
 if ! envsubst < spells/create-stream.yaml | charms spell prove \
-  --funding-utxo="$in_utxo_0" \
+  --funding-utxo="$funding_utxo" \
   --funding-utxo-value="$funding_value_sats" \
   --change-address="$addr_0" \
   --prev-txs="$PREV_TXS" \

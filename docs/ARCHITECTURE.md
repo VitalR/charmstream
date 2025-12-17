@@ -216,17 +216,17 @@ This ensures the contract verifies **actual Bitcoin value movement**, not just s
 
 ### What CharmStream Prevents
 
-- **Over-claiming**: Cannot claim more than vested amount at current time  
-- **Beneficiary switch**: Once set, beneficiary cannot be changed  
-- **State rollback**: `claimed_amount` must monotonically increase  
-- **Value mismatch**: Native BTC outputs must exactly match state deltas  
+- **Over-claiming**: Cannot claim more than vested amount at current time
+- **Beneficiary switch**: Once set, beneficiary cannot be changed
+- **State rollback**: `claimed_amount` must monotonically increase
+- **Value mismatch**: Native BTC outputs must exactly match state deltas
 - **Invalid transitions**: zkVM verifies WASM contract approved the transaction
 
 ### What CharmStream Does NOT Prevent (Future Work)
 
-- **Cancellation**: No mechanism for payer to cancel unvested funds  
-- **Cliff vesting**: No support for "lock until date X, then unlock"  
-- **Pause/resume**: Once started, vesting continues regardless  
+- **Cancellation**: No mechanism for payer to cancel unvested funds
+- **Cliff vesting**: No support for "lock until date X, then unlock"
+- **Pause/resume**: Once started, vesting continues regardless
 - **Multi-sig**: No built-in multi-party control
 
 These are all implementable as contract extensions!
@@ -306,11 +306,11 @@ Replace native BTC inputs/outputs with Grail zkBTC vault operations, enabling:
 
 ### Best Practices
 
-- **Always use confirmed UTXOs** (≥1 confirmation)  
-- **Use fresh UTXOs for each proof attempt**  
-- **Broadcast immediately after proof generation**  
-- **Set minimum stream amounts** (≥5000 sats) to avoid dust  
-- **Validate vesting calculations client-side** before proving  
+- **Always use confirmed UTXOs** (≥1 confirmation)
+- **Use fresh UTXOs for each proof attempt**
+- **Broadcast immediately after proof generation**
+- **Set minimum stream amounts** (≥5000 sats) to avoid dust
+- **Validate vesting calculations client-side** before proving
 - **Check mempool status** after broadcast for debugging
 
 ## Future Directions

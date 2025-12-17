@@ -11,7 +11,7 @@ private_inputs:
 # ---- Transaction inputs ----
 ins:
   # Funding UTXO – no stream charm yet
-  - utxo_id: ${in_utxo_0}
+  - utxo_id: ${stream_utxo_0}
     charms: {}
 
 # ---- Transaction outputs ----
