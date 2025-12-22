@@ -26,4 +26,4 @@ outs:
         start_time: ${start_time}
         end_time: ${end_time}
         # beneficiary_dest is the scriptPubKey as hex string
-        beneficiary_dest: ${beneficiary_dest_hex}
+        beneficiary_dest: '${beneficiary_dest_hex}'

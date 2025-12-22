@@ -14,7 +14,7 @@ ins:
         claimed_amount: ${claimed_before}
         start_time: ${start_time}
         end_time: ${end_time}
-        beneficiary_dest: ${beneficiary_dest_hex}
+        beneficiary_dest: '${beneficiary_dest_hex}'
 
 outs:
   # (1) payout to beneficiary (no charms)
@@ -30,4 +30,4 @@ outs:
         claimed_amount: ${claimed_after}
         start_time: ${start_time}
         end_time: ${end_time}
-        beneficiary_dest: ${beneficiary_dest_hex}
+        beneficiary_dest: '${beneficiary_dest_hex}'

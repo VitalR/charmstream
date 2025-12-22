@@ -86,10 +86,19 @@ export beneficiary_addr="${beneficiary_addr_input:-$addr_0}"
 
 echo "  Stream address: $addr_0"
 echo "  Beneficiary address: $beneficiary_addr"
+export change_addr=$(bitcoin-cli getnewaddress "charmstream-create-change" bech32)
+echo "  Change address: $change_addr"
 
-# 6. Derive beneficiary_dest
+# 6. Derive scriptPubKeys
 echo ""
-echo "[6/9] Deriving beneficiary scriptPubKey..."
+echo "[6/9] Deriving scriptPubKeys..."
+export stream_dest_hex=$(bitcoin-cli getaddressinfo "$addr_0" | jq -r '.scriptPubKey')
+if [ -z "$stream_dest_hex" ] || [ "$stream_dest_hex" = "null" ]; then
+  echo "ERROR: Could not resolve scriptPubKey for $addr_0"
+  exit 1
+fi
+echo "  stream_dest_hex: ${stream_dest_hex}"
+
 export beneficiary_dest_hex=$(bitcoin-cli getaddressinfo "$beneficiary_addr" | jq -r '.scriptPubKey')
 if [ -z "$beneficiary_dest_hex" ] || [ "$beneficiary_dest_hex" = "null" ]; then
   echo "ERROR: Could not resolve scriptPubKey for $beneficiary_addr"
@@ -128,7 +137,7 @@ echo "  Running spell prove (this may take a minute)..."
 if ! envsubst < spells/create-stream.yaml | charms spell prove \
   --funding-utxo="$funding_utxo" \
   --funding-utxo-value="$funding_value_sats" \
-  --change-address="$addr_0" \
+  --change-address="$change_addr" \
   --prev-txs="$PREV_TXS" \
   --app-bins="$app_bin" > .build/create.raw 2>&1; then
   echo ""
@@ -152,14 +161,32 @@ fi
 echo "Transaction hex extracted ($(wc -c < .build/create.hex | tr -d ' ') bytes)"
 echo ""
 
+echo "Locating stream output index..."
+stream_vout_index=$(
+  bitcoin-cli decoderawtransaction "$(cat .build/create.hex)" |
+    jq -r --arg spk "$stream_dest_hex" --argjson sats "$total_amount" '
+      .vout[]
+      | select(.scriptPubKey.hex == $spk)
+      | select(((.value * 100000000) | round) == $sats)
+      | .n
+    ' | head -n 1
+)
+if [ -z "$stream_vout_index" ]; then
+  echo "ERROR: Could not determine stream output index"
+  exit 1
+fi
+echo "  Stream output index: $stream_vout_index"
+
 # Auto-broadcast
 echo "Broadcasting transaction..."
-if STREAM_TXID=$(bitcoin-cli sendrawtransaction $(cat .build/create.hex) 2>&1); then
+create_hex=$(cat .build/create.hex)
+if STREAM_TXID=$(bitcoin-cli sendrawtransaction "$create_hex" 2>&1); then
   echo ""
   echo "=== CREATE STREAM SUCCESS ==="
   echo ""
   echo "Stream TXID: $STREAM_TXID"
-  echo "Stream UTXO: $STREAM_TXID:0"
+  export stream_utxo_0="$STREAM_TXID:$stream_vout_index"
+  echo "Stream UTXO: $stream_utxo_0"
   echo ""
   echo "View on explorer:"
   echo "https://mempool.space/testnet4/tx/$STREAM_TXID"
@@ -167,7 +194,6 @@ if STREAM_TXID=$(bitcoin-cli sendrawtransaction $(cat .build/create.hex) 2>&1); 
   
   # Export for claim flow
   export STREAM_TXID
-  export stream_utxo_0="$STREAM_TXID:0"
 else
   echo ""
   echo "ERROR: Broadcast failed: $STREAM_TXID"
@@ -186,7 +212,27 @@ echo "export app_id=\"$app_id\""
 echo "export addr_0=\"$addr_0\""
 echo "export beneficiary_addr=\"$beneficiary_addr\""
 echo "export beneficiary_dest_hex=\"$beneficiary_dest_hex\""
+echo "export stream_dest_hex=\"$stream_dest_hex\""
 echo "export total_amount=$total_amount"
 echo "export start_time=$start_time"
 echo "export end_time=$end_time"
+echo "export stream_utxo_0=\"$stream_utxo_0\""
+echo "export claimed_amount=0"
+
+cat > .build/env.sh <<EOF
+export app_bin="$app_bin"
+export app_vk="$app_vk"
+export app_id="$app_id"
+export addr_0="$addr_0"
+export beneficiary_addr="$beneficiary_addr"
+export beneficiary_dest_hex="$beneficiary_dest_hex"
+export stream_dest_hex="$stream_dest_hex"
+export total_amount=$total_amount
+export start_time=$start_time
+export end_time=$end_time
+export stream_utxo_0="$stream_utxo_0"
+export claimed_amount=0
+EOF
+echo ""
+echo "Saved environment to .build/env.sh (source this file before running claim flow)."
 

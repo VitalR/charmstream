@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ENV_FILE=".build/env.sh"
+if [ -f "$ENV_FILE" ]; then
+  echo "Loading $ENV_FILE..."
+  # shellcheck disable=SC1091
+  source "$ENV_FILE"
+fi
+
 echo "=== CharmStream CLAIM Flow (testnet4) ==="
 echo ""
 
@@ -29,10 +36,31 @@ echo "  app_id: $app_id"
 echo "  total_amount: $total_amount sats"
 echo "  stream period: $start_time -> $end_time"
 echo ""
+export stream_dest_hex=${stream_dest_hex:-$(bitcoin-cli getaddressinfo "$addr_0" | jq -r '.scriptPubKey')}
+if [ -z "$stream_dest_hex" ] || [ "$stream_dest_hex" = "null" ]; then
+  echo "ERROR: Could not resolve scriptPubKey for $addr_0"
+  exit 1
+fi
+
+export claimed_amount=${claimed_amount:-0}
 
 # 1. Get stream UTXO
 echo "[1/6] Identifying stream UTXO..."
-read -p "Enter stream UTXO (format: txid:vout, from create tx): " stream_utxo_0
+default_stream="${stream_utxo_0:-}"
+prompt_suffix=""
+if [ -n "$default_stream" ]; then
+  prompt_suffix=" [default: $default_stream]"
+fi
+read -p "Enter stream UTXO (format: txid:vout, from create tx)$prompt_suffix: " stream_input
+if [ -z "$stream_input" ]; then
+  if [ -z "$default_stream" ]; then
+    echo "ERROR: Stream UTXO is required"
+    exit 1
+  fi
+  stream_utxo_0="$default_stream"
+else
+  stream_utxo_0="$stream_input"
+fi
 export stream_utxo_0
 
 stream_txid=$(echo "$stream_utxo_0" | cut -d: -f1)
@@ -53,7 +81,7 @@ echo "  Stream UTXO value: $stream_value_sats sats"
 # 3. Set claim parameters
 echo ""
 echo "[3/6] Setting claim parameters..."
-export claimed_before=0
+export claimed_before=$claimed_amount
 echo "  Current time: $(date -u)"
 export now=$(date -u +%s)
 
@@ -81,6 +109,10 @@ export claimed_after
 
 if [ "$claimed_after" -gt "$vested_pct" ]; then
   echo "ERROR: Claiming more than vested amount!"
+  exit 1
+fi
+if [ "$claimed_after" -lt "$claimed_before" ]; then
+  echo "ERROR: claimed_after must be >= claimed_before ($claimed_before)"
   exit 1
 fi
 
@@ -112,6 +144,8 @@ echo "  Fee UTXO value: $fee_value_sats sats"
 
 export funding_utxo="$fee_utxo"
 export funding_value_sats="$fee_value_sats"
+export change_addr=$(bitcoin-cli getnewaddress "charmstream-claim-change" bech32)
+echo "  Change address: $change_addr"
 
 # 5. Fetch prev txs (deduplicate if same parent)
 echo ""
@@ -138,7 +172,7 @@ echo "  Running spell prove (this may take a minute)..."
 if ! envsubst < spells/claim-stream.yaml | charms spell prove \
   --funding-utxo="$funding_utxo" \
   --funding-utxo-value="$funding_value_sats" \
-  --change-address="$addr_0" \
+  --change-address="$change_addr" \
   --prev-txs="$PREV_TXS" \
   --app-bins="$app_bin" > .build/claim.raw 2>&1; then
   echo ""
@@ -162,10 +196,60 @@ if ! jq -r '.[1].bitcoin' .build/claim.raw > .build/claim.hex 2>/dev/null; then
 fi
 echo "Raw transaction saved to: .build/claim.hex"
 echo ""
-echo "To decode and inspect:"
-echo "  bitcoin-cli decoderawtransaction \$(cat .build/claim.hex) | jq '.vout[] | {n,value,addr:.scriptPubKey.addresses}'"
-echo ""
-echo "To broadcast:"
-echo "  bitcoin-cli sendrawtransaction \$(cat .build/claim.hex)"
-echo ""
 
+echo "Locating updated stream output index..."
+claim_stream_index=$(
+  bitcoin-cli decoderawtransaction "$(cat .build/claim.hex)" |
+    jq -r --arg spk "$stream_dest_hex" --argjson sats "$remaining_sats" '
+      .vout[]
+      | select(.scriptPubKey.hex == $spk)
+      | select(((.value * 100000000) | round) == $sats)
+      | .n
+    ' | head -n 1
+)
+if [ -z "$claim_stream_index" ]; then
+  echo "ERROR: Could not determine updated stream output index"
+  exit 1
+fi
+echo "  Updated stream vout index: $claim_stream_index"
+
+echo "Broadcasting claim transaction..."
+claim_hex=$(cat .build/claim.hex)
+if CLAIM_TXID=$(bitcoin-cli sendrawtransaction "$claim_hex" 2>&1); then
+  echo ""
+  echo "=== CLAIM SUCCESS ==="
+  echo ""
+  export stream_utxo_0="$CLAIM_TXID:$claim_stream_index"
+  export claimed_amount="$claimed_after"
+  echo "Claim TXID: $CLAIM_TXID"
+  echo "Updated Stream UTXO: $stream_utxo_0"
+  echo ""
+  echo "View on explorer:"
+  echo "https://mempool.space/testnet4/tx/$CLAIM_TXID"
+  echo ""
+
+  cat > .build/env.sh <<EOF
+export app_bin="$app_bin"
+export app_vk="$app_vk"
+export app_id="$app_id"
+export addr_0="$addr_0"
+export beneficiary_addr="$beneficiary_addr"
+export beneficiary_dest_hex="$beneficiary_dest_hex"
+export stream_dest_hex="$stream_dest_hex"
+export total_amount=$total_amount
+export start_time=$start_time
+export end_time=$end_time
+export stream_utxo_0="$stream_utxo_0"
+export claimed_amount=$claimed_amount
+EOF
+  echo "Saved updated environment to .build/env.sh"
+  echo ""
+  echo "Updated environment variables:"
+  echo "export stream_utxo_0=\"$stream_utxo_0\""
+  echo "export claimed_amount=$claimed_amount"
+else
+  echo ""
+  echo "ERROR: Broadcast failed: $CLAIM_TXID"
+  echo "You can decode the tx via: bitcoin-cli decoderawtransaction \"\$(cat .build/claim.hex)\""
+  exit 1
+fi
