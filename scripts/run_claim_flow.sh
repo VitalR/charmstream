@@ -1,7 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENV_FILE=".build/env.sh"
+BUILD_DIR=".build"
+mkdir -p "$BUILD_DIR"
+USED_UTXO_LOG="$BUILD_DIR/used_utxos.txt"
+touch "$USED_UTXO_LOG"
+
+ensure_utxo_unused() {
+  local utxo="$1"
+  if grep -Fxq "$utxo" "$USED_UTXO_LOG"; then
+    echo "ERROR: UTXO $utxo was already used in a prior spell prove. Choose a different UTXO."
+    exit 1
+  fi
+}
+
+record_utxo() {
+  local utxo="$1"
+  if ! grep -Fxq "$utxo" "$USED_UTXO_LOG"; then
+    echo "$utxo" >> "$USED_UTXO_LOG"
+  fi
+}
+
+ENV_FILE="$BUILD_DIR/env.sh"
 if [ -f "$ENV_FILE" ]; then
   echo "Loading $ENV_FILE..."
   # shellcheck disable=SC1091
@@ -61,6 +81,7 @@ if [ -z "$stream_input" ]; then
 else
   stream_utxo_0="$stream_input"
 fi
+ensure_utxo_unused "$stream_utxo_0"
 export stream_utxo_0
 
 stream_txid=$(echo "$stream_utxo_0" | cut -d: -f1)
@@ -134,6 +155,7 @@ if [ "$fee_utxo" = "$stream_utxo_0" ]; then
   echo "ERROR: Fee UTXO must differ from stream UTXO."
   exit 1
 fi
+ensure_utxo_unused "$fee_utxo"
 
 fee_txid=$(echo "$fee_utxo" | cut -d: -f1)
 fee_vout=$(echo "$fee_utxo" | cut -d: -f2)
@@ -166,9 +188,10 @@ fi
 # 6. Prove spell (skip check since our contract needs coin_outs which check doesn't populate)
 echo ""
 echo "[6/6] Proving claim spell..."
-mkdir -p .build
 
 echo "  Running spell prove (this may take a minute)..."
+record_utxo "$stream_utxo_0"
+record_utxo "$funding_utxo"
 if ! envsubst < spells/claim-stream.yaml | charms spell prove \
   --funding-utxo="$funding_utxo" \
   --funding-utxo-value="$funding_value_sats" \
@@ -228,7 +251,7 @@ if CLAIM_TXID=$(bitcoin-cli sendrawtransaction "$claim_hex" 2>&1); then
   echo "https://mempool.space/testnet4/tx/$CLAIM_TXID"
   echo ""
 
-  cat > .build/env.sh <<EOF
+  cat > "$ENV_FILE" <<EOF
 export app_bin="$app_bin"
 export app_vk="$app_vk"
 export app_id="$app_id"
@@ -242,7 +265,7 @@ export end_time=$end_time
 export stream_utxo_0="$stream_utxo_0"
 export claimed_amount=$claimed_amount
 EOF
-  echo "Saved updated environment to .build/env.sh"
+  echo "Saved updated environment to $ENV_FILE"
   echo ""
   echo "Updated environment variables:"
   echo "export stream_utxo_0=\"$stream_utxo_0\""

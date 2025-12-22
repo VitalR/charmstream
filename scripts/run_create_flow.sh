@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BUILD_DIR=".build"
+mkdir -p "$BUILD_DIR"
+USED_UTXO_LOG="$BUILD_DIR/used_utxos.txt"
+touch "$USED_UTXO_LOG"
+
+ensure_utxo_unused() {
+  local utxo="$1"
+  if grep -Fxq "$utxo" "$USED_UTXO_LOG"; then
+    echo "ERROR: UTXO $utxo was already used in a prior spell prove. Pick a different UTXO."
+    exit 1
+  fi
+}
+
+record_utxo() {
+  local utxo="$1"
+  if ! grep -Fxq "$utxo" "$USED_UTXO_LOG"; then
+    echo "$utxo" >> "$USED_UTXO_LOG"
+  fi
+}
+
 echo "=== CharmStream CREATE Flow (testnet4) ==="
 echo ""
 
@@ -26,6 +46,8 @@ if [ "$stream_utxo_0" = "$funding_utxo" ]; then
   echo "ERROR: Stream UTXO and funding UTXO must be different."
   exit 1
 fi
+ensure_utxo_unused "$stream_utxo_0"
+ensure_utxo_unused "$funding_utxo"
 export stream_utxo_0
 export funding_utxo
 export in_utxo_0="$stream_utxo_0"
@@ -131,9 +153,9 @@ fi
 # 9. Prove spell (skip check since our contract needs coin_outs which check doesn't populate)
 echo ""
 echo "[9/9] Proving spell..."
-mkdir -p .build
-
 echo "  Running spell prove (this may take a minute)..."
+record_utxo "$stream_utxo_0"
+record_utxo "$funding_utxo"
 if ! envsubst < spells/create-stream.yaml | charms spell prove \
   --funding-utxo="$funding_utxo" \
   --funding-utxo-value="$funding_value_sats" \
@@ -219,7 +241,7 @@ echo "export end_time=$end_time"
 echo "export stream_utxo_0=\"$stream_utxo_0\""
 echo "export claimed_amount=0"
 
-cat > .build/env.sh <<EOF
+cat > "$BUILD_DIR/env.sh" <<EOF
 export app_bin="$app_bin"
 export app_vk="$app_vk"
 export app_id="$app_id"
@@ -234,5 +256,5 @@ export stream_utxo_0="$stream_utxo_0"
 export claimed_amount=0
 EOF
 echo ""
-echo "Saved environment to .build/env.sh (source this file before running claim flow)."
+echo "Saved environment to $BUILD_DIR/env.sh (source this file before running claim flow)."
 
