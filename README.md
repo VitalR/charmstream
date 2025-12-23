@@ -60,6 +60,14 @@ This will:
 4. Broadcast the claim transaction
 5. Update the stream state on-chain
 
+## Debugging & Escalation Toolkit
+
+- **Deterministic create runs** – `./scripts/run_create_flow.sh --repro` freezes `now`, `start_time`, `end_time`, `total_amount`, and default addresses so you can retry the _exact same_ spell text when debugging prover behaviour. Override the frozen values with `REPRO_TOTAL_AMOUNT`, `REPRO_DURATION`, `REPRO_NOW`, `REPRO_ADDR_0`, `REPRO_BENEFICIARY_ADDR`, or `REPRO_CHANGE_ADDR`.
+- **Consistent RPC config** – Both scripts honor `BTC_CMD` (default `bitcoin-cli -testnet4`). Set `BTC_CMD="bitcoin-cli -testnet4 -rpcwallet=<name>"` if you run a non-default wallet or endpoint.
+- **Rich logging out of the box** – Every run writes the fully rendered spell, its SHA256, the exact `charms` command, the prev-tx hex, and a `*.context.txt` summary under `.build/`. Both scripts verify that the provided UTXOs exist in the decoded prev-tx blobs and that the returned raw transaction spends the expected inputs and pays the expected outputs.
+- **UTXO safety rails** – `.build/used_utxos.txt` tracks each `txid:vout` submitted to the prover so you can avoid reusing funding UTXOs that the Charms service has already seen.
+- **Escalation bundles** – `./scripts/make_escalation_bundle.sh create` (or `claim`) bundles all relevant artifacts plus your `.build/env.sh` into a tarball you can share with the Charms team. See `docs/CHARMS_ESCALATION.md` for the context and questions we send upstream.
+
 ## How It Works
 
 1. **Create Stream**: A payer creates a "stream UTXO" by locking BTC into a charm-enchanted output. The `StreamState` records:
