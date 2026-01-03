@@ -10,12 +10,15 @@ We consistently observe prover-side failures on **Bitcoin testnet4** where the W
 
 1. `400 Bad Request: "duplicate funding UTXO spend with different spell"`
 2. `400 Bad Request: "Proof request <id> is unexecutable"`
+3. `400 Bad Request: "Proof request <id> timed out during the auction"`
 
 Both happen even when:
 
 - stream input UTXO and funding UTXO are freshly generated, confirmed, and never used in `spell prove` before
 - we supply raw prev-tx hex for both inputs via `--prev-txs`
 - the WASM contract passes (`✅ app contract satisfied` in `.build/create.raw`)
+
+Note: `timed out during the auction` is observed in the same situation (app validation succeeds first), but indicates the prover did not finalize the request within its internal scheduling/auction window.
 
 ---
 
