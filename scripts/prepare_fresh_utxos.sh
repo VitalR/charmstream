@@ -54,6 +54,41 @@ prompt_with_default() {
   echo "${input:-$default}"
 }
 
+is_number() {
+  # Accept integers or decimals (e.g. 0.001, 1, 10.5)
+  [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+prompt_number_with_default() {
+  local prompt="$1"
+  local default="$2"
+  local input=""
+  while true; do
+    read -p "$prompt [$default]: " input
+    input="${input:-$default}"
+    if is_number "$input"; then
+      echo "$input"
+      return 0
+    fi
+    echo "ERROR: Please enter a numeric value (example: $default)" >&2
+  done
+}
+
+prompt_int_with_default() {
+  local prompt="$1"
+  local default="$2"
+  local input=""
+  while true; do
+    read -p "$prompt [$default]: " input
+    input="${input:-$default}"
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+      echo "$input"
+      return 0
+    fi
+    echo "ERROR: Please enter an integer value (example: $default)" >&2
+  done
+}
+
 require_address() {
   local addr="$1"
   if [ -z "$addr" ]; then
@@ -109,10 +144,10 @@ echo "Stream address: $stream_addr"
 echo "Fee address:    $fee_addr"
 echo ""
 
-stream_amount=$(prompt_with_default "Send amount to STREAM address (BTC)" "$STREAM_AMOUNT_BTC")
-fee_amount=$(prompt_with_default "Send amount to FEE address (BTC)" "$FEE_AMOUNT_BTC")
-fee_rate=$(prompt_with_default "Fee rate (sat/vB)" "$FEE_RATE_SATVB")
-minconf=$(prompt_with_default "Wait for confirmations" "$MIN_CONFIRMATIONS")
+stream_amount=$(prompt_number_with_default "Send amount to STREAM address (BTC)" "$STREAM_AMOUNT_BTC")
+fee_amount=$(prompt_number_with_default "Send amount to FEE address (BTC)" "$FEE_AMOUNT_BTC")
+fee_rate=$(prompt_int_with_default "Fee rate (sat/vB)" "$FEE_RATE_SATVB")
+minconf=$(prompt_int_with_default "Wait for confirmations" "$MIN_CONFIRMATIONS")
 
 echo ""
 echo "Creating two new UTXOs by sending to yourself..."
