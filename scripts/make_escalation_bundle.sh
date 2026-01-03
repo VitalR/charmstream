@@ -40,8 +40,13 @@ FILES=(
 )
 
 MISSING=()
+PRESENT=()
 for f in "${FILES[@]}"; do
-  [[ -f "$f" ]] || MISSING+=("$f")
+  if [[ -f "$f" ]]; then
+    PRESENT+=("$f")
+  else
+    MISSING+=("$f")
+  fi
 done
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
@@ -52,7 +57,14 @@ fi
 ts=$(date -u +"%Y%m%dT%H%M%SZ")
 OUT="$BUILD_DIR/${FLOW}_bundle_${ts}.tar.gz"
 
-tar -czf "$OUT" --ignore-failed-read "${FILES[@]}"
+if [[ ${#PRESENT[@]} -eq 0 ]]; then
+  echo "ERROR: No artifacts found to bundle for flow=$FLOW under $BUILD_DIR" >&2
+  exit 1
+fi
+
+# macOS bsdtar doesn't support GNU tar's --ignore-failed-read.
+# We pre-filter missing files and archive only those that exist.
+tar -czf "$OUT" "${PRESENT[@]}"
 
 cat <<MSG
 Bundle created: $OUT
